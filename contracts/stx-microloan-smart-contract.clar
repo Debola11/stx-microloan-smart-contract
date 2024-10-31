@@ -85,3 +85,88 @@
         (<= term-blocks maximum-term-blocks)
     )
 )
+
+(define-private (is-valid-rate (rate uint))
+    (and 
+        (> rate u0)
+        (<= rate u1000000) ;; Max 100% APR represented as 1000000/1000000
+    )
+)
+
+(define-read-only (is-contract-active)
+    (not (var-get contract-paused))
+)
+
+;; Main Functions
+(define-public (contribute-to-pool (amount uint))
+    (begin
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (is-valid-loan-amount amount) ERR-INVALID-AMOUNT)
+
+        (let ((new-total (try! (safe-add (var-get total-pool-amount) amount))))
+            (asserts! (<= new-total maximum-loan-amount) ERR-OVERFLOW)
+
+            (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+
+            (let ((current-share (default-to 
+                    { amount: u0, last-deposit-height: u0 } 
+                    (map-get? lending-pool-shares { lender: tx-sender }))))
+
+                (let ((new-amount (try! (safe-add (get amount current-share) amount))))
+                    (map-set lending-pool-shares
+                        { lender: tx-sender }
+                        { 
+                            amount: new-amount,
+                            last-deposit-height: block-height
+                        }
+                    )
+
+                    (var-set total-pool-amount new-total)
+                    (ok true)
+                )
+            )
+        )
+    )
+)
+
+(define-public (request-loan (amount uint) (term-blocks uint))
+    (let (
+        (borrower tx-sender)
+        (current-height block-height)
+        (end-height (+ current-height term-blocks))
+    )
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (not (is-eq borrower (as-contract tx-sender))) ERR-ZERO-ADDRESS)
+
+        (asserts! (is-valid-loan-amount amount) ERR-INVALID-AMOUNT)
+        (asserts! (is-valid-term term-blocks) ERR-INVALID-TERM)
+        (asserts! (<= amount (var-get total-pool-amount)) ERR-INSUFFICIENT-BALANCE)
+        (asserts! (is-none (map-get? loans { borrower: borrower })) ERR-LOAN-EXISTS)
+
+        (try! (stx-transfer? amount (as-contract tx-sender) borrower))
+
+        (let (
+            (new-pool-amount (try! (safe-subtract (var-get total-pool-amount) amount)))
+            (new-active-loans (try! (safe-add (var-get total-active-loans) u1)))
+        )
+            (map-set loans
+                { borrower: borrower }
+                {
+                    principal-amount: amount,
+                    interest-rate: u50000, ;; 5% represented as 50000/1000000
+                    start-height: current-height,
+                    end-height: end-height,
+                    total-repaid: u0,
+                    status: "ACTIVE",
+                    reputation-score: u100,
+                    last-payment-height: current-height
+                }
+            )
+
+            (var-set total-pool-amount new-pool-amount)
+            (var-set total-active-loans new-active-loans)
+            (ok true)
+        )
+    )
+)
