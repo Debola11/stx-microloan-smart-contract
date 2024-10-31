@@ -170,3 +170,46 @@
         )
     )
 )
+
+
+(define-public (make-repayment (amount uint))
+    (let (
+        (borrower tx-sender)
+        (loan (unwrap! (map-get? loans { borrower: borrower }) ERR-LOAN-NOT-FOUND))
+        (current-height block-height)
+    )
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+        (asserts! (is-eq (get status loan) "ACTIVE") ERR-LOAN-NOT-ACTIVE)
+        (asserts! (<= current-height (get end-height loan)) ERR-LOAN-EXPIRED)
+
+        (let (
+            (new-total-repaid (try! (safe-add (get total-repaid loan) amount)))
+            (interest-amount (try! (calculate-interest (get principal-amount loan) (get interest-rate loan))))
+            (total-owed (try! (safe-add (get principal-amount loan) interest-amount)))
+        )
+            (try! (stx-transfer? amount borrower (as-contract tx-sender)))
+
+            (map-set loans
+                { borrower: borrower }
+                (merge loan {
+                    total-repaid: new-total-repaid,
+                    last-payment-height: current-height,
+                    status: (if (>= new-total-repaid total-owed)
+                        "COMPLETED"
+                        "ACTIVE"
+                    )
+                })
+            )
+
+            (var-set total-pool-amount (try! (safe-add (var-get total-pool-amount) amount)))
+
+            (if (>= new-total-repaid total-owed)
+                (var-set total-active-loans (try! (safe-subtract (var-get total-active-loans) u1)))
+                true
+            )
+
+            (ok true)
+        )
+    )
+)
