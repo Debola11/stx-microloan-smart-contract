@@ -213,3 +213,61 @@
         )
     )
 )
+
+
+;; Read-only Functions
+(define-read-only (calculate-interest (principal uint) (rate uint))
+    (begin
+        (asserts! (is-valid-rate rate) ERR-INVALID-RATE)
+        (safe-divide (* principal rate) u1000000)
+    )
+)
+
+(define-read-only (get-loan-details (borrower principal))
+    (map-get? loans { borrower: borrower })
+)
+
+(define-read-only (get-pool-share (lender principal))
+    (map-get? lending-pool-shares { lender: lender })
+)
+
+(define-read-only (get-total-pool-amount)
+    (var-get total-pool-amount)
+)
+
+;; Admin Functions
+(define-public (update-loan-status (borrower principal) (new-status (string-ascii 20)))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) ERR-UNAUTHORIZED)
+        (asserts! (is-contract-active) ERR-UNAUTHORIZED)
+        (match (map-get? loans { borrower: borrower })
+            loan (begin
+                (map-set loans
+                    { borrower: borrower }
+                    (merge loan { 
+                        status: new-status,
+                        last-payment-height: block-height 
+                    })
+                )
+                (ok true)
+            )
+            ERR-LOAN-NOT-FOUND
+        )
+    )
+)
+
+(define-public (pause-contract)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) ERR-UNAUTHORIZED)
+        (var-set contract-paused true)
+        (ok true)
+    )
+)
+
+(define-public (resume-contract)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) ERR-UNAUTHORIZED)
+        (var-set contract-paused false)
+        (ok true)
+    )
+)
