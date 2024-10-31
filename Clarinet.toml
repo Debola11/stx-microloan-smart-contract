@@ -1,6 +1,6 @@
 [project]
 name = "stx-microloan-smart-contract"
-authors = []
+authors = ["Balogun Adebola"]
 description = ""
 telemetry = true
 requirements = []
