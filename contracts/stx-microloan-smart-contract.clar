@@ -271,3 +271,141 @@
         (ok true)
     )
 )
+
+
+;; Additional Error Constants for Loan Lifecycle
+(define-constant ERR-INELIGIBLE (err u120))
+(define-constant ERR-MAX-LOAN-EXCEEDED (err u121))
+(define-constant ERR-NO-ACTIVE-LOAN (err u122))
+(define-constant ERR-TERM-EXTENSION-LIMIT (err u123))
+(define-constant ERR-EARLY-REPAYMENT-FAILED (err u124))
+
+;; Constants for loan health calculation
+(define-constant HEALTH-EXCELLENT u100)
+(define-constant HEALTH-GOOD u80)
+(define-constant HEALTH-FAIR u60)
+(define-constant HEALTH-POOR u40)
+(define-constant HEALTH-DEFAULT u0)
+
+;; Constants for loan parameters
+(define-constant MAX-TERM-EXTENSIONS u3)
+(define-constant EXTENSION-FEE-RATE u10000) ;; 1% fee for extension
+(define-constant EARLY-REPAYMENT-DISCOUNT u20000) ;; 2% discount for early repayment
+
+;; Validation function to check if a borrower is eligible for a loan
+(define-public (validate-loan-eligibility (borrower principal))
+    (let (
+        (existing-loan (map-get? loans {borrower: borrower}))
+        (loan-data (default-to 
+            {
+                principal-amount: u0,
+                interest-rate: u0,
+                start-height: u0,
+                end-height: u0,
+                total-repaid: u0,
+                status: "NONE",
+                reputation-score: u0,
+                last-payment-height: u0
+            }
+            existing-loan))
+        (credit-score (get reputation-score loan-data))
+    )
+        (asserts! (is-none existing-loan) ERR-LOAN-EXISTS)
+        (asserts! (>= credit-score u50) ERR-INELIGIBLE) ;; Minimum credit score requirement
+        (asserts! (>= (var-get total-pool-amount) minimum-loan-amount) ERR-INSUFFICIENT-BALANCE)
+        (ok true)
+    )
+)
+
+;; Calculate maximum loan amount based on borrower's reputation and pool availability
+(define-public (calculate-max-loan-amount (borrower principal))
+    (let (
+        (loan-data (default-to 
+            {
+                principal-amount: u0,
+                interest-rate: u0,
+                start-height: u0,
+                end-height: u0,
+                total-repaid: u0,
+                status: "NONE",
+                reputation-score: u0,
+                last-payment-height: u0
+            }
+            (map-get? loans {borrower: borrower})))
+        (credit-score (get reputation-score loan-data))
+        (pool-amount (var-get total-pool-amount))
+    )
+        (let (
+            (base-amount (/ (* pool-amount credit-score) u100))
+        )
+            (ok (if (> base-amount maximum-loan-amount)
+                    maximum-loan-amount
+                    base-amount))
+        )
+    )
+)
+
+;; Get the health status of a loan
+(define-read-only (get-loan-health-status (borrower principal))
+    (match (map-get? loans {borrower: borrower})
+        loan-data (let (
+            (current-height stacks-block-height)
+            (expected-repayment (/ (* (get principal-amount loan-data) 
+                                    (- current-height (get start-height loan-data)))
+                                 (- (get end-height loan-data) (get start-height loan-data))))
+            (actual-repayment (get total-repaid loan-data))
+        )
+            (if (> expected-repayment u0)
+                (let ((health-ratio (/ (* actual-repayment u100) expected-repayment)))
+                    (ok (if (>= health-ratio u95) 
+                            HEALTH-EXCELLENT
+                            (if (>= health-ratio u80)
+                                HEALTH-GOOD
+                                (if (>= health-ratio u60)
+                                    HEALTH-FAIR
+                                    (if (>= health-ratio u40)
+                                        HEALTH-POOR
+                                        HEALTH-DEFAULT))))))
+                (ok HEALTH-EXCELLENT))) ;; New loan with no expected repayment yet
+        ERR-LOAN-NOT-FOUND
+    )
+)
+
+;; Process early repayment with discount
+(define-public (process-early-repayment (amount uint))
+    (let (
+        (borrower tx-sender)
+        (loan (unwrap! (map-get? loans {borrower: borrower}) ERR-LOAN-NOT-FOUND))
+        (current-height stacks-block-height)
+    )
+        (asserts! (is-eq (get status loan) "ACTIVE") ERR-LOAN-NOT-ACTIVE)
+        (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+
+        (let (
+            (remaining-principal (- (get principal-amount loan) (get total-repaid loan)))
+            (discount (/ (* remaining-principal EARLY-REPAYMENT-DISCOUNT) u1000000))
+            (discounted-amount (- remaining-principal discount))
+        )
+            (asserts! (>= amount discounted-amount) ERR-INSUFFICIENT-BALANCE)
+
+            ;; Process repayment
+            (try! (stx-transfer? amount borrower (as-contract tx-sender)))
+
+            ;; Update loan status
+            (map-set loans
+                {borrower: borrower}
+                (merge loan {
+                    total-repaid: (get principal-amount loan),
+                    status: "COMPLETED",
+                    last-payment-height: current-height
+                })
+            )
+
+            ;; Update contract state
+            (var-set total-active-loans (- (var-get total-active-loans) u1))
+            (var-set total-pool-amount (+ (var-get total-pool-amount) amount))
+
+            (ok true)
+        )
+    )
+)
